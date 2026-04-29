@@ -1,91 +1,77 @@
-import math
-from web3 import Web3
-import json
 import time
+import json
+import os
+import subprocess
 
-# ===== CONFIG =====
-RPC_URL = "https://sepolia.infura.io/v3/TU_API_KEY"
-PRIVATE_KEY = "TU_PRIVATE_KEY"
-ADDRESS = "TU_DIRECCION"
 
-CONTRACT_ADDRESS = "0x..."
-ABI_PATH = "TapizABI.json"
+class TapizSensor:
+    def __init__(self):
+        self.state = {
+            "K": 1.0,
+            "Phi": 1.0,
+            "Delta": 0.0,
+            "step": 0
+        }
+        self.last_commit_signal = 0.0
 
-# ===== PRIMOS =====
-def primes(n):
-    ps = []
-    x = 2
-    while len(ps) < n:
-        for p in ps:
-            if x % p == 0:
-                break
-        else:
-            ps.append(x)
-        x += 1
-    return ps
+    def signal(self):
+        return (self.state["K"] * self.state["Phi"]) - self.state["Delta"]
 
-# ===== MATRICES =====
-def build_T(n):
-    p = primes(n)
-    return [[math.log(p[i]) + math.log(p[j]) for j in range(n)] for i in range(n)]
+    def update(self):
+        s = self.signal()
 
-def transpose(M):
-    return list(map(list, zip(*M)))
+        self.state["K"] = 0.9 * self.state["K"] + 0.1 * abs(s)
+        self.state["Phi"] = 0.95 * self.state["Phi"] + 0.05 * (1 + s * 0.01)
+        self.state["Delta"] = 0.5 * self.state["Delta"] + 0.5 * (s * 0.1)
 
-def subtract(A, B):
-    n = len(A)
-    return [[A[i][j] - B[i][j] for j in range(n)] for i in range(n)]
+        self.state["step"] += 1
+        return s
 
-def multiply_i(M):
-    n = len(M)
-    return [[1j * M[i][j] for j in range(n)] for i in range(n)]
+    def save(self, path="estado.json"):
+        with open(path, "w") as f:
+            json.dump(self.state, f, indent=2)
 
-def norm(M):
-    return sum(abs(x)**2 for row in M for x in row) ** 0.5
 
-# ===== BLOCKCHAIN =====
-def load_contract(w3):
-    with open(ABI_PATH) as f:
-        abi = json.load(f)
-    return w3.eth.contract(address=CONTRACT_ADDRESS, abi=abi)
+# -------------------------
+# GIT CONTROL LAYER
+# -------------------------
 
-def send_norm(w3, contract, value):
-    nonce = w3.eth.get_transaction_count(ADDRESS)
+def git_commit(signal, state):
+    msg = f"tapiz sync | s={signal:.4f} | K={state['K']:.3f}"
 
-    tx = contract.functions.update(int(value)).build_transaction({
-        "from": ADDRESS,
-        "nonce": nonce,
-        "gas": 200000,
-        "gasPrice": w3.to_wei("10", "gwei")
-    })
+    subprocess.run(["git", "add", "."], stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", msg], stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "push"], stdout=subprocess.DEVNULL)
 
-    signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
 
-    print("TX:", tx_hash.hex())
+def run():
+    sensor = TapizSensor()
 
-# ===== LOOP PRINCIPAL =====
-def main():
-    w3 = Web3(Web3.HTTPProvider(RPC_URL))
-    contract = load_contract(w3)
-
-    n = 6
+    print("\n--- TAPIZ SENSOR + GIT ACTIVE ---\n")
 
     while True:
-        T = build_T(n)
-        H = T
-        K = subtract(H, transpose(H))
-        L = multiply_i(K)
+        s = sensor.update()
+        sensor.save()
 
-        k_norm = norm(K)
+        print(
+            f"step={sensor.state['step']} "
+            f"| s={s:.5f} "
+            f"| K={sensor.state['K']:.5f} "
+            f"| Phi={sensor.state['Phi']:.5f} "
+            f"| Delta={sensor.state['Delta']:.5f}"
+        )
 
-        print("\n--- TAPIZ ---")
-        print("||K|| =", k_norm)
+        # -------------------------
+        # CONDICIÓN DE COMMIT
+        # -------------------------
+        delta_signal = abs(s - sensor.last_commit_signal)
 
-        if k_norm != 0:
-            send_norm(w3, contract, k_norm)
+        if delta_signal > 0.5:
+            git_commit(s, sensor.state)
+            sensor.last_commit_signal = s
 
-        time.sleep(30)
+        time.sleep(1)
+
 
 if __name__ == "__main__":
-    main()
+    run()
